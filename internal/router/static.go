@@ -1,0 +1,35 @@
+package router
+
+import (
+	"embed"
+	"io/fs"
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+)
+
+//go:embed all:dist
+var distFS embed.FS
+
+func serveStatic(r *gin.Engine) {
+	distSubFS, _ := fs.Sub(distFS, "dist")
+	staticHandler := http.FileServer(http.FS(distSubFS))
+
+	r.GET("/", func(c *gin.Context) {
+		c.FileFromFS("/", http.FS(distSubFS))
+	})
+
+	r.GET("/assets/*filepath", func(c *gin.Context) {
+		c.FileFromFS(c.Request.URL.Path, http.FS(distSubFS))
+	})
+
+	r.NoRoute(func(c *gin.Context) {
+		path := c.Request.URL.Path
+		if f, err := distSubFS.Open(path[1:]); err == nil {
+			f.Close()
+			staticHandler.ServeHTTP(c.Writer, c.Request)
+			return
+		}
+		c.FileFromFS("/", http.FS(distSubFS))
+	})
+}

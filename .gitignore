@@ -1,0 +1,22 @@
+# 二进制
+subdock
+*.exe
+
+# 数据
+data/
+*.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 前端
+web/node_modules/
+web/dist/
+
+# 嵌入的前端构建产物
+internal/router/dist/
+
+# 系统
+.DS_Store
