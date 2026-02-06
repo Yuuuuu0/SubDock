@@ -29,7 +29,7 @@
         :pagination="pagination"
         :row-class-name="rowClassName"
         table-layout="fixed"
-        :scroll-x="930"
+        :scroll-x="1120"
       />
     </n-card>
 
@@ -76,9 +76,13 @@
         </n-form-item>
 
         <n-form-item label="提醒天数" path="remind_days">
-          <n-input-number v-model:value="formValue.remind_days" :min="0" style="width: 100%">
+          <n-input-number v-model:value="formValue.remind_days" :min="1" style="width: 100%">
             <template #suffix>天</template>
           </n-input-number>
+        </n-form-item>
+
+        <n-form-item label="自动续订" path="auto_renew">
+          <n-switch v-model:value="formValue.auto_renew" />
         </n-form-item>
 
         <n-form-item label="备注" path="remark">
@@ -97,11 +101,13 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, h } from 'vue'
-import { useMessage, useDialog, NButton, NTag, NSpace, NIcon } from 'naive-ui'
+import { useMessage, useDialog, NButton, NTag, NSpace, NIcon, NTooltip } from 'naive-ui'
 import type { DataTableColumns, FormInst } from 'naive-ui'
-import { SearchOutline, AddOutline, CreateOutline, TrashOutline, NotificationsOutline } from '@vicons/ionicons5'
+import { SearchOutline, AddOutline, CreateOutline, TrashOutline, NotificationsOutline, RefreshOutline } from '@vicons/ionicons5'
 import { subscriptionApi } from '../api'
 import type { Subscription } from '../api'
+
+type SubscriptionSubmitPayload = Pick<Subscription, 'name' | 'amount' | 'currency' | 'start_date' | 'cycle_value' | 'cycle_unit' | 'remind_days' | 'remark' | 'auto_renew'>
 
 const message = useMessage()
 const dialog = useDialog()
@@ -125,6 +131,8 @@ const formValue = ref<Subscription>({
   cycle_value: 1,
   cycle_unit: 'month',
   expire_date: null,
+  auto_renew: false,
+  renew_count: 0,
   remind_days: 3,
   remark: ''
 })
@@ -226,9 +234,31 @@ const columns = computed<DataTableColumns<Subscription>>(() => [
   {
     title: '名称',
     key: 'name',
-    width: 220,
+    width: 280,
     render(row) {
-      return h('div', { style: 'font-weight: 600; color: #1A1A1A;' }, row.name)
+      const remark = row.remark?.trim() || ''
+      const remarkNode = remark
+        ? h(
+            NTooltip,
+            { trigger: 'hover' },
+            {
+              default: () => remark,
+              trigger: () =>
+                h(
+                  'div',
+                  {
+                    class: 'name-remark-ellipsis'
+                  },
+                  remark
+                )
+            }
+          )
+        : null
+
+      return h('div', { class: 'name-cell' }, [
+        h('div', { style: 'font-weight: 600; color: #1A1A1A;' }, row.name),
+        ...(remarkNode ? [remarkNode] : [])
+      ])
     }
   },
   {
@@ -275,11 +305,31 @@ const columns = computed<DataTableColumns<Subscription>>(() => [
     }
   },
   {
+    title: '续订',
+    key: 'renew',
+    width: 130,
+    render(row) {
+      const renewCount = row.renew_count ?? 0
+      const autoRenew = row.auto_renew ? '自动' : '手动'
+      return h('div', {}, [
+        h('div', { style: 'font-weight: 600;' }, `${renewCount} 次`),
+        h('div', { style: 'font-size: 0.8em; color: #6B7280;' }, autoRenew)
+      ])
+    }
+  },
+  {
     title: '操作',
     key: 'actions',
-    width: 170,
+    width: 220,
     render(row) {
       return h(NSpace, null, () => [
+        h(NButton, {
+          size: 'small',
+          quaternary: true,
+          circle: true,
+          type: 'success',
+          onClick: () => handleRenew(row)
+        }, { icon: () => h(NIcon, null, () => h(RefreshOutline)) }),
         h(NButton, {
           size: 'small',
           quaternary: true,
@@ -336,6 +386,8 @@ const handleCreate = () => {
     cycle_value: 1,
     cycle_unit: 'month',
     expire_date: null,
+    auto_renew: false,
+    renew_count: 0,
     remind_days: 3,
     remark: ''
   }
@@ -348,9 +400,29 @@ const handleEdit = (row: Subscription) => {
   formValue.value = { 
     ...row,
     start_date: row.start_date.slice(0, 10),
-    expire_date: row.expire_date ? row.expire_date.slice(0, 10) : null
+    expire_date: row.expire_date ? row.expire_date.slice(0, 10) : null,
+    auto_renew: row.auto_renew ?? false,
+    renew_count: row.renew_count ?? 0
   }
   showModal.value = true
+}
+
+const handleRenew = (row: Subscription) => {
+  dialog.info({
+    title: '确认续订',
+    content: `确定要为订阅 "${row.name}" 续订 1 次吗？`,
+    positiveText: '确定',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      try {
+        await subscriptionApi.renew(row.id as number)
+        message.success('续订成功')
+        fetchData()
+      } catch (error: any) {
+        message.error(error.response?.data?.error || '续订失败')
+      }
+    }
+  })
 }
 
 const handleDelete = (row: Subscription) => {
@@ -386,11 +458,22 @@ const handleSubmit = (e: Event) => {
     if (!errors) {
       submitting.value = true
       try {
+        const payload: SubscriptionSubmitPayload = {
+          name: formValue.value.name,
+          amount: formValue.value.amount,
+          currency: formValue.value.currency,
+          start_date: formValue.value.start_date,
+          cycle_value: formValue.value.cycle_value,
+          cycle_unit: formValue.value.cycle_unit,
+          remind_days: formValue.value.remind_days,
+          remark: formValue.value.remark || '',
+          auto_renew: formValue.value.auto_renew ?? false
+        }
         if (isEdit.value && editingId.value) {
-          await subscriptionApi.update(editingId.value, formValue.value)
+          await subscriptionApi.update(editingId.value, payload as Subscription)
           message.success('更新成功')
         } else {
-          await subscriptionApi.create(formValue.value)
+          await subscriptionApi.create(payload as Subscription)
           message.success('创建成功')
         }
         showModal.value = false
@@ -411,8 +494,21 @@ onMounted(() => {
 
 <style scoped>
 .page-container {
-  max-width: 1000px;
+  max-width: 1280px;
   margin: 0 auto;
+}
+
+.name-cell {
+  min-width: 0;
+}
+
+.name-remark-ellipsis {
+  margin-top: 2px;
+  font-size: 12px;
+  color: #6B7280;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .page-header {

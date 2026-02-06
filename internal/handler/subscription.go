@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm/clause"
 
 	"subdock/internal/model"
 	"subdock/internal/service"
@@ -20,6 +21,7 @@ type CreateSubscriptionRequest struct {
 	CycleValue int     `json:"cycle_value" binding:"required,gt=0"`
 	CycleUnit  string  `json:"cycle_unit" binding:"required,oneof=day month quarter half_year year"`
 	ExpireDate string  `json:"expire_date"`
+	AutoRenew  bool    `json:"auto_renew"`
 	RemindDays int     `json:"remind_days"`
 	Remark     string  `json:"remark"`
 }
@@ -33,6 +35,7 @@ type UpdateSubscriptionRequest struct {
 	CycleValue int      `json:"cycle_value"`
 	CycleUnit  string   `json:"cycle_unit"`
 	ExpireDate string   `json:"expire_date"`
+	AutoRenew  *bool    `json:"auto_renew"`
 	RemindDays int      `json:"remind_days"`
 	Remark     string   `json:"remark"`
 }
@@ -94,6 +97,7 @@ func CreateSubscription(c *gin.Context) {
 		StartDate:  startDate,
 		CycleValue: req.CycleValue,
 		CycleUnit:  model.CycleUnit(req.CycleUnit),
+		AutoRenew:  req.AutoRenew,
 		RemindDays: remindDays,
 		Remark:     req.Remark,
 	}
@@ -139,6 +143,7 @@ func UpdateSubscription(c *gin.Context) {
 	}
 
 	updates := make(map[string]interface{})
+	cycleRelatedChanged := false
 
 	if req.Name != "" {
 		updates["name"] = req.Name
@@ -161,14 +166,20 @@ func UpdateSubscription(c *gin.Context) {
 		}
 		updates["start_date"] = startDate
 		subscription.StartDate = startDate
+		cycleRelatedChanged = true
 	}
 	if req.CycleValue > 0 {
 		updates["cycle_value"] = req.CycleValue
 		subscription.CycleValue = req.CycleValue
+		cycleRelatedChanged = true
 	}
 	if req.CycleUnit != "" {
 		updates["cycle_unit"] = req.CycleUnit
 		subscription.CycleUnit = model.CycleUnit(req.CycleUnit)
+		cycleRelatedChanged = true
+	}
+	if req.AutoRenew != nil {
+		updates["auto_renew"] = *req.AutoRenew
 	}
 	if req.RemindDays > 0 {
 		updates["remind_days"] = req.RemindDays
@@ -184,14 +195,78 @@ func UpdateSubscription(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "到期日期格式错误"})
 			return
 		}
-		updates["expire_date"] = expireDate
-	} else if req.StartDate != "" || req.CycleValue > 0 || req.CycleUnit != "" {
+		if cycleRelatedChanged && expireDate.Equal(subscription.ExpireDate) {
+			updates["expire_date"] = subscription.CalculateExpireDate()
+		} else {
+			updates["expire_date"] = expireDate
+		}
+	} else if cycleRelatedChanged {
 		// 如果修改了开始日期或周期，重新计算到期日期
 		updates["expire_date"] = subscription.CalculateExpireDate()
 	}
 
 	if err := model.GetDB().Model(&subscription).Updates(updates).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新订阅失败"})
+		return
+	}
+
+	model.GetDB().First(&subscription, id)
+	c.JSON(http.StatusOK, subscription)
+}
+
+// RenewSubscription 手动续订一次
+func RenewSubscription(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的 ID"})
+		return
+	}
+
+	tx := model.GetDB().Begin()
+	if tx.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "续订失败"})
+		return
+	}
+
+	var subscription model.Subscription
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&subscription, id).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusNotFound, gin.H{"error": "订阅不存在"})
+		return
+	}
+
+	oldExpireDate := subscription.ExpireDate
+	base := subscription.ExpireDate
+	if subscription.CycleValue <= 0 {
+		subscription.CycleValue = 1
+	}
+	newExpireDate := subscription.CalculateExpireDateFrom(base)
+	newRenewCount := subscription.RenewCount + 1
+
+	if err := tx.Model(&subscription).Updates(map[string]interface{}{
+		"expire_date": newExpireDate,
+		"renew_count": newRenewCount,
+	}).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "续订失败"})
+		return
+	}
+
+	renewal := &model.SubscriptionRenewal{
+		SubscriptionID: subscription.ID,
+		RenewedAt:      time.Now(),
+		OldExpireDate:  oldExpireDate,
+		NewExpireDate:  newExpireDate,
+		RenewCount:     newRenewCount,
+	}
+	if err := tx.Create(renewal).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "续订记录写入失败"})
+		return
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "续订失败"})
 		return
 	}
 

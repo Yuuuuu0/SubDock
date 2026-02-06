@@ -24,6 +24,7 @@ func Setup() *gin.Engine {
 			auth.GET("/subscriptions", handler.ListSubscriptions)
 			auth.POST("/subscriptions", handler.CreateSubscription)
 			auth.PUT("/subscriptions/:id", handler.UpdateSubscription)
+			auth.POST("/subscriptions/:id/renew", handler.RenewSubscription)
 			auth.DELETE("/subscriptions/:id", handler.DeleteSubscription)
 			auth.POST("/subscriptions/:id/test-notify", handler.TestSubscriptionNotify)
 

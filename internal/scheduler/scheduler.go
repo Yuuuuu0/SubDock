@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/robfig/cron/v3"
+	"gorm.io/gorm/clause"
 
 	"subdock/internal/model"
 	"subdock/internal/service"
@@ -69,10 +70,76 @@ func (s *Scheduler) checkAndNotify() {
 	}
 
 	for _, sub := range subscriptions {
+		if sub.AutoRenew {
+			renewed, err := s.autoRenewIfNeeded(sub.ID)
+			if err != nil {
+				log.Printf("自动续订失败(订阅ID=%d): %v", sub.ID, err)
+			} else if renewed {
+				if err := model.GetDB().First(&sub, sub.ID).Error; err != nil {
+					log.Printf("自动续订后刷新订阅失败(订阅ID=%d): %v", sub.ID, err)
+				}
+			}
+		}
+
 		if sub.ShouldRemindToday() {
 			s.sendNotification(sub)
 		}
 	}
+}
+
+// autoRenewIfNeeded 当启用自动续订且已到期时自动续订 1 次
+func (s *Scheduler) autoRenewIfNeeded(subscriptionID uint) (bool, error) {
+	tx := model.GetDB().Begin()
+	if tx.Error != nil {
+		return false, tx.Error
+	}
+
+	var subscription model.Subscription
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&subscription, subscriptionID).Error; err != nil {
+		tx.Rollback()
+		return false, err
+	}
+
+	today := time.Now().Truncate(24 * time.Hour)
+	expire := subscription.ExpireDate.Truncate(24 * time.Hour)
+	if !subscription.AutoRenew || expire.After(today) {
+		tx.Rollback()
+		return false, nil
+	}
+
+	oldExpireDate := subscription.ExpireDate
+	base := subscription.ExpireDate
+	if base.Before(today) {
+		base = today
+	}
+	newExpireDate := subscription.CalculateExpireDateFrom(base)
+	newRenewCount := subscription.RenewCount + 1
+
+	if err := tx.Model(&subscription).Updates(map[string]interface{}{
+		"expire_date": newExpireDate,
+		"renew_count": newRenewCount,
+	}).Error; err != nil {
+		tx.Rollback()
+		return false, err
+	}
+
+	renewal := &model.SubscriptionRenewal{
+		SubscriptionID: subscription.ID,
+		RenewedAt:      time.Now(),
+		OldExpireDate:  oldExpireDate,
+		NewExpireDate:  newExpireDate,
+		RenewCount:     newRenewCount,
+	}
+	if err := tx.Create(renewal).Error; err != nil {
+		tx.Rollback()
+		return false, err
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
 // sendNotification 发送订阅到期提醒

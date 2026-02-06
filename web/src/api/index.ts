@@ -16,6 +16,8 @@ export interface Subscription {
   cycle_value: number
   cycle_unit: 'day' | 'month' | 'quarter' | 'half_year' | 'year'
   expire_date: string | null // YYYY-MM-DD or null
+  auto_renew?: boolean
+  renew_count?: number
   remind_days: number
   remark?: string
 }
@@ -104,6 +106,9 @@ export const subscriptionApi = {
   },
   testNotify(id: number) {
     return apiClient.post(`/subscriptions/${id}/test-notify`)
+  },
+  renew(id: number) {
+    return apiClient.post<Subscription>(`/subscriptions/${id}/renew`)
   }
 }
 

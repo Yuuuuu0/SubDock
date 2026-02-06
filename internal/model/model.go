@@ -20,11 +20,11 @@ type Admin struct {
 type CycleUnit string
 
 const (
-	CycleUnitDay     CycleUnit = "day"
-	CycleUnitMonth   CycleUnit = "month"
-	CycleUnitQuarter CycleUnit = "quarter"
+	CycleUnitDay      CycleUnit = "day"
+	CycleUnitMonth    CycleUnit = "month"
+	CycleUnitQuarter  CycleUnit = "quarter"
 	CycleUnitHalfYear CycleUnit = "half_year"
-	CycleUnitYear    CycleUnit = "year"
+	CycleUnitYear     CycleUnit = "year"
 )
 
 // Subscription 订阅
@@ -37,6 +37,8 @@ type Subscription struct {
 	CycleValue int            `gorm:"not null;default:1" json:"cycle_value"`
 	CycleUnit  CycleUnit      `gorm:"size:16;not null;default:month" json:"cycle_unit"`
 	ExpireDate time.Time      `gorm:"not null" json:"expire_date"`
+	AutoRenew  bool           `gorm:"not null;default:false" json:"auto_renew"`
+	RenewCount int            `gorm:"not null;default:0" json:"renew_count"`
 	RemindDays int            `gorm:"not null;default:3" json:"remind_days"`
 	Remark     string         `gorm:"size:512" json:"remark"`
 	CreatedAt  time.Time      `json:"created_at"`
@@ -44,21 +46,36 @@ type Subscription struct {
 	DeletedAt  gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
+// SubscriptionRenewal 订阅续订记录
+type SubscriptionRenewal struct {
+	ID             uint      `gorm:"primarykey" json:"id"`
+	SubscriptionID uint      `gorm:"index;not null" json:"subscription_id"`
+	RenewedAt      time.Time `gorm:"not null" json:"renewed_at"`
+	OldExpireDate  time.Time `gorm:"not null" json:"old_expire_date"`
+	NewExpireDate  time.Time `gorm:"not null" json:"new_expire_date"`
+	RenewCount     int       `gorm:"not null" json:"renew_count"`
+}
+
 // CalculateExpireDate 根据开始日期和周期计算到期日期
 func (s *Subscription) CalculateExpireDate() time.Time {
+	return s.CalculateExpireDateFrom(s.StartDate)
+}
+
+// CalculateExpireDateFrom 根据给定基准日期和周期计算到期日期
+func (s *Subscription) CalculateExpireDateFrom(base time.Time) time.Time {
 	switch s.CycleUnit {
 	case CycleUnitDay:
-		return s.StartDate.AddDate(0, 0, s.CycleValue)
+		return base.AddDate(0, 0, s.CycleValue)
 	case CycleUnitMonth:
-		return s.StartDate.AddDate(0, s.CycleValue, 0)
+		return base.AddDate(0, s.CycleValue, 0)
 	case CycleUnitQuarter:
-		return s.StartDate.AddDate(0, s.CycleValue*3, 0)
+		return base.AddDate(0, s.CycleValue*3, 0)
 	case CycleUnitHalfYear:
-		return s.StartDate.AddDate(0, s.CycleValue*6, 0)
+		return base.AddDate(0, s.CycleValue*6, 0)
 	case CycleUnitYear:
-		return s.StartDate.AddDate(s.CycleValue, 0, 0)
+		return base.AddDate(s.CycleValue, 0, 0)
 	default:
-		return s.StartDate.AddDate(0, s.CycleValue, 0)
+		return base.AddDate(0, s.CycleValue, 0)
 	}
 }
 
