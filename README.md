@@ -21,10 +21,19 @@
 
 ## 快速开始
 
-### 1) Docker Compose（推荐）
+### 1) Docker Compose（推荐，直接使用 Docker Hub 镜像）
 
 ```bash
-docker compose up -d --build
+docker compose up -d
+```
+
+`docker-compose.yml` 默认使用：`yuuuuu0/subdock:latest`（`pull_policy: always`）。
+
+如需手动拉取后再启动：
+
+```bash
+docker compose pull
+docker compose up -d
 ```
 
 默认访问地址：`http://localhost:8080`
@@ -39,7 +48,21 @@ docker compose up -d --build
 | `WEBSITE_TITLE` | `SubDock` | 前端显示的网站标题 |
 | `TZ` | `Asia/Shanghai` | 容器时区 |
 
-### 3) 首次登录
+### 3) 直接使用镜像运行（可选）
+
+```bash
+docker run -d \
+  --name subdock \
+  -p 127.0.0.1:8080:8080 \
+  -v $(pwd)/data:/app/data \
+  -e TZ=Asia/Shanghai \
+  -e WEBSITE_TITLE=SubDock \
+  -e JWT_SECRET=your_jwt_secret \
+  --restart always \
+  yuuuuu0/subdock:latest
+```
+
+### 4) 首次登录
 
 - 用户名固定为：`admin`
 - 初始密码会在服务首次启动时输出到日志

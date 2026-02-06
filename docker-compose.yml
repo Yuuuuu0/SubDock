@@ -1,7 +1,8 @@
 services:
   subdock:
     container_name: subdock
-    build: .
+    image: yuuuuu0/subdock:latest
+    pull_policy: always
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
