@@ -6,7 +6,7 @@
         <p class="app-subtitle">订阅管理系统</p>
       </div>
       <n-card class="login-card" :bordered="false" size="large">
-        <n-form ref="formRef" :model="formValue" :rules="rules">
+        <n-form ref="formRef" :model="formValue" :rules="rules" @submit.prevent="handleLogin">
           <n-form-item path="username" label="用户名">
             <n-input v-model:value="formValue.username" placeholder="请输入用户名" @keydown.enter="handleLogin">
               <template #prefix>
@@ -74,8 +74,7 @@ const rules = {
   }
 }
 
-const handleLogin = (e: Event) => {
-  e.preventDefault()
+const handleLogin = () => {
   formRef.value?.validate(async (errors) => {
     if (!errors) {
       loading.value = true

@@ -133,7 +133,7 @@ const formValue = ref<Subscription>({
   expire_date: null,
   auto_renew: false,
   renew_count: 0,
-  remind_days: 3,
+  remind_days: 7,
   remark: ''
 })
 
@@ -247,7 +247,16 @@ const columns = computed<DataTableColumns<Subscription>>(() => [
                 h(
                   'div',
                   {
-                    class: 'name-remark-ellipsis'
+                    style: {
+                      marginTop: '4px',
+                      fontSize: '11px',
+                      color: '#6B7280',
+                      overflow: 'hidden',
+                      whiteSpace: 'nowrap',
+                      textOverflow: 'ellipsis',
+                      width: '100%',
+                      display: 'block'
+                    }
                   },
                   remark
                 )
@@ -388,7 +397,7 @@ const handleCreate = () => {
     expire_date: null,
     auto_renew: false,
     renew_count: 0,
-    remind_days: 3,
+    remind_days: 7,
     remark: ''
   }
   showModal.value = true
@@ -500,15 +509,10 @@ onMounted(() => {
 
 .name-cell {
   min-width: 0;
-}
-
-.name-remark-ellipsis {
-  margin-top: 2px;
-  font-size: 12px;
-  color: #6B7280;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+  min-height: 48px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
 
 .page-header {

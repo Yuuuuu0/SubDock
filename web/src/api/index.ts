@@ -70,9 +70,14 @@ apiClient.interceptors.request.use(
 apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
+    // 只有在非登录接口遇到 401 时才跳转（token 过期）
+    // 登录接口的 401 应该由页面处理并显示错误消息
     if (error.response && error.response.status === 401) {
-      localStorage.removeItem('token')
-      window.location.href = '/login'
+      const isLoginRequest = error.config?.url?.includes('/login')
+      if (!isLoginRequest) {
+        localStorage.removeItem('token')
+        window.location.href = '/login'
+      }
     }
     return Promise.reject(error)
   }

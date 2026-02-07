@@ -56,9 +56,15 @@ type SubscriptionRenewal struct {
 	RenewCount     int       `gorm:"not null" json:"renew_count"`
 }
 
-// CalculateExpireDate 根据开始日期和周期计算到期日期
+// CalculateExpireDate 根据开始日期、周期和续订次数计算到期日期
+// 到期日期 = 开始日期 + (续订次数 + 1) 个周期
 func (s *Subscription) CalculateExpireDate() time.Time {
-	return s.CalculateExpireDateFrom(s.StartDate)
+	totalCycles := s.RenewCount + 1
+	base := s.StartDate
+	for i := 0; i < totalCycles; i++ {
+		base = s.CalculateExpireDateFrom(base)
+	}
+	return base
 }
 
 // CalculateExpireDateFrom 根据给定基准日期和周期计算到期日期

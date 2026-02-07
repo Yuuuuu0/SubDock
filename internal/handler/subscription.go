@@ -188,20 +188,7 @@ func UpdateSubscription(c *gin.Context) {
 		updates["remark"] = req.Remark
 	}
 
-	// 处理到期日期
-	if req.ExpireDate != "" {
-		expireDate, err := time.Parse("2006-01-02", req.ExpireDate)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "到期日期格式错误"})
-			return
-		}
-		if cycleRelatedChanged && expireDate.Equal(subscription.ExpireDate) {
-			updates["expire_date"] = subscription.CalculateExpireDate()
-		} else {
-			updates["expire_date"] = expireDate
-		}
-	} else if cycleRelatedChanged {
-		// 如果修改了开始日期或周期，重新计算到期日期
+	if cycleRelatedChanged {
 		updates["expire_date"] = subscription.CalculateExpireDate()
 	}
 
