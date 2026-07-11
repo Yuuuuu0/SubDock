@@ -1,6 +1,5 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
-import naive from 'naive-ui'
 
 import App from './App.vue'
 import router from './router'
@@ -12,12 +11,9 @@ const pinia = createPinia()
 
 app.use(pinia)
 app.use(router)
-app.use(naive)
 
-// 加载网站配置
+// 加载公开站点配置；失败时 Store 会保留默认标题。
 const configStore = useConfigStore(pinia)
-configStore.fetchConfig().then(() => {
-  document.title = configStore.websiteTitle
-})
+void configStore.fetchConfig()
 
 app.mount('#app')

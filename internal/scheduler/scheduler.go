@@ -1,191 +1,153 @@
 package scheduler
 
 import (
+	"context"
 	"fmt"
 	"log"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/robfig/cron/v3"
-	"gorm.io/gorm/clause"
+	"gorm.io/gorm"
 
 	"subdock/internal/model"
 	"subdock/internal/service"
 )
 
-// Scheduler 定时任务调度器
+// NotificationSender 定义调度器发送通知所需的最小渠道能力。
+type NotificationSender interface {
+	SendTelegram(botToken, chatID, message string) error
+	SendBark(barkURL, title, message string) error
+}
+
+// Scheduler 每小时独立执行自动续订，并在配置时段发送到期提醒。
 type Scheduler struct {
 	cron     *cron.Cron
-	notifier *service.Notifier
+	db       *gorm.DB
+	settings *service.SettingService
+	renewals *service.RenewalService
+	notifier NotificationSender
+	now      func() time.Time
 }
 
-// New 创建调度器
-func New() *Scheduler {
+// New 创建使用默认通知客户端和系统时钟的调度器。
+func New(db *gorm.DB) *Scheduler {
+	return NewWithDependencies(db, service.NewNotifier(), time.Now)
+}
+
+// NewWithDependencies 创建可注入通知发送器和时钟的调度器，便于隔离测试。
+func NewWithDependencies(db *gorm.DB, notifier NotificationSender, now func() time.Time) *Scheduler {
+	if now == nil {
+		now = time.Now
+	}
 	return &Scheduler{
-		cron:     cron.New(),
-		notifier: service.NewNotifier(),
+		cron: cron.New(
+			cron.WithLocation(time.Local),
+			cron.WithChain(
+				cron.Recover(cron.DefaultLogger),
+				cron.SkipIfStillRunning(cron.DefaultLogger),
+			),
+		),
+		db:       db,
+		settings: service.NewSettingService(db),
+		renewals: service.NewRenewalServiceWithClock(db, now),
+		notifier: notifier,
+		now:      now,
 	}
 }
 
-// Start 启动调度器
-func (s *Scheduler) Start() {
-	// 每小时检查一次
-	s.cron.AddFunc("0 * * * *", s.checkAndNotify)
+// Start 注册每小时任务并启动调度器，注册失败时返回错误。
+func (s *Scheduler) Start() error {
+	if _, err := s.cron.AddFunc("0 * * * *", s.checkAndNotify); err != nil {
+		return fmt.Errorf("注册订阅调度任务失败: %w", err)
+	}
 	s.cron.Start()
 	log.Println("调度器已启动")
+	return nil
 }
 
-// Stop 停止调度器
+// Stop 停止调度器并等待正在执行的任务退出。
 func (s *Scheduler) Stop() {
-	s.cron.Stop()
+	<-s.cron.Stop().Done()
 }
 
-// checkAndNotify 检查并发送到期提醒
+// checkAndNotify 先处理全部到期自动续订，再根据当前小时决定是否发送提醒。
 func (s *Scheduler) checkAndNotify() {
-	currentHour := time.Now().Hour()
+	ctx := context.Background()
+	now := s.now()
 
-	// 获取通知时段配置
-	notifyHours := getSetting("notify_hours", "9")
-	hours := parseNotifyHours(notifyHours)
-
-	// 检查当前小时是否在通知时段内
-	shouldNotify := false
-	for _, h := range hours {
-		if h == currentHour {
-			shouldNotify = true
-			break
-		}
-	}
-
-	if !shouldNotify {
-		return
-	}
-
-	// 获取需要提醒的订阅
 	var subscriptions []model.Subscription
-	if err := model.GetDB().Find(&subscriptions).Error; err != nil {
+	if err := s.db.WithContext(ctx).Find(&subscriptions).Error; err != nil {
 		log.Printf("获取订阅列表失败: %v", err)
 		return
 	}
 
-	for _, sub := range subscriptions {
-		if sub.AutoRenew {
-			renewed, err := s.autoRenewIfNeeded(sub.ID)
-			if err != nil {
-				log.Printf("自动续订失败(订阅ID=%d): %v", sub.ID, err)
-			} else if renewed {
-				if err := model.GetDB().First(&sub, sub.ID).Error; err != nil {
-					log.Printf("自动续订后刷新订阅失败(订阅ID=%d): %v", sub.ID, err)
-				}
-			}
+	for index := range subscriptions {
+		if !subscriptions[index].AutoRenew {
+			continue
 		}
-
-		if sub.ShouldRemindToday() {
-			s.sendNotification(sub)
+		updated, renewed, err := s.renewals.AutoRenewIfDue(ctx, subscriptions[index].ID)
+		if err != nil {
+			log.Printf("自动续订失败(订阅ID=%d): %v", subscriptions[index].ID, err)
+			continue
 		}
-	}
-}
-
-// autoRenewIfNeeded 当启用自动续订且已到期时自动续订 1 次
-func (s *Scheduler) autoRenewIfNeeded(subscriptionID uint) (bool, error) {
-	tx := model.GetDB().Begin()
-	if tx.Error != nil {
-		return false, tx.Error
-	}
-
-	var subscription model.Subscription
-	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&subscription, subscriptionID).Error; err != nil {
-		tx.Rollback()
-		return false, err
-	}
-
-	today := time.Now().Truncate(24 * time.Hour)
-	expire := subscription.ExpireDate.Truncate(24 * time.Hour)
-	if !subscription.AutoRenew || expire.After(today) {
-		tx.Rollback()
-		return false, nil
-	}
-
-	oldExpireDate := subscription.ExpireDate
-	base := subscription.ExpireDate
-	if base.Before(today) {
-		base = today
-	}
-	newExpireDate := subscription.CalculateExpireDateFrom(base)
-	newRenewCount := subscription.RenewCount + 1
-
-	if err := tx.Model(&subscription).Updates(map[string]interface{}{
-		"expire_date": newExpireDate,
-		"renew_count": newRenewCount,
-	}).Error; err != nil {
-		tx.Rollback()
-		return false, err
-	}
-
-	renewal := &model.SubscriptionRenewal{
-		SubscriptionID: subscription.ID,
-		RenewedAt:      time.Now(),
-		OldExpireDate:  oldExpireDate,
-		NewExpireDate:  newExpireDate,
-		RenewCount:     newRenewCount,
-	}
-	if err := tx.Create(renewal).Error; err != nil {
-		tx.Rollback()
-		return false, err
-	}
-
-	if err := tx.Commit().Error; err != nil {
-		return false, err
-	}
-
-	return true, nil
-}
-
-// sendNotification 发送订阅到期提醒
-func (s *Scheduler) sendNotification(sub model.Subscription) {
-	daysLeft := int(time.Until(sub.ExpireDate).Hours() / 24)
-	message := fmt.Sprintf("📢 订阅到期提醒\n\n订阅名称: %s\n金额: %.2f %s\n到期日期: %s\n剩余天数: %d 天",
-		sub.Name, sub.Amount, sub.Currency, sub.ExpireDate.Format("2006-01-02"), daysLeft)
-
-	// 尝试 Telegram 通知
-	telegramToken := getSetting("telegram_bot_token", "")
-	telegramChatID := getSetting("telegram_chat_id", "")
-	if telegramToken != "" && telegramChatID != "" {
-		if err := s.notifier.SendTelegram(telegramToken, telegramChatID, message); err != nil {
-			log.Printf("发送 Telegram 通知失败: %v", err)
+		if renewed {
+			subscriptions[index] = *updated
 		}
 	}
 
-	// 尝试 Bark 通知
-	barkURL := getSetting("bark_url", "")
-	if barkURL != "" {
-		if err := s.notifier.SendBark(barkURL, "订阅到期提醒", message); err != nil {
-			log.Printf("发送 Bark 通知失败: %v", err)
+	settings, err := s.settings.GetNotificationSettings(ctx)
+	if err != nil {
+		log.Printf("读取通知设置失败: %v", err)
+		return
+	}
+	hours, err := service.ParseNotifyHours(settings.NotifyHours)
+	if err != nil {
+		log.Printf("通知时段配置无效: %v", err)
+		return
+	}
+	if !containsHour(hours, now.Hour()) {
+		return
+	}
+
+	for _, subscription := range subscriptions {
+		if subscription.ShouldRemindAt(now) {
+			s.sendNotification(subscription, settings, now)
 		}
 	}
 }
 
-// parseNotifyHours 解析通知时段配置
-func parseNotifyHours(s string) []int {
-	var hours []int
-	parts := strings.Split(s, ",")
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if h, err := strconv.Atoi(p); err == nil && h >= 1 && h <= 24 {
-			hours = append(hours, h%24)
+// sendNotification 将一条订阅提醒发送到全部已配置渠道。
+func (s *Scheduler) sendNotification(subscription model.Subscription, settings service.NotificationSettings, now time.Time) {
+	today := model.DateOnlyIn(now, now.Location())
+	expireDate := model.DateOnlyIn(subscription.ExpireDate, now.Location())
+	daysLeft := int(expireDate.Sub(today).Hours() / 24)
+	message := fmt.Sprintf(
+		"📢 订阅到期提醒\n\n订阅名称: %s\n金额: %.2f %s\n到期日期: %s\n剩余天数: %d 天",
+		subscription.Name,
+		subscription.Amount,
+		subscription.Currency,
+		subscription.ExpireDate.Format("2006-01-02"),
+		daysLeft,
+	)
+
+	if settings.TelegramBotToken != "" && settings.TelegramChatID != "" {
+		if err := s.notifier.SendTelegram(settings.TelegramBotToken, settings.TelegramChatID, message); err != nil {
+			log.Printf("发送 Telegram 通知失败(订阅ID=%d): %v", subscription.ID, err)
 		}
 	}
-	if len(hours) == 0 {
-		hours = []int{9}
+	if settings.BarkURL != "" {
+		if err := s.notifier.SendBark(settings.BarkURL, "订阅到期提醒", message); err != nil {
+			log.Printf("发送 Bark 通知失败(订阅ID=%d): %v", subscription.ID, err)
+		}
 	}
-	return hours
 }
 
-func getSetting(key, defaultVal string) string {
-	var setting model.Setting
-	if err := model.GetDB().Where("key = ?", key).First(&setting).Error; err != nil {
-		return defaultVal
+// containsHour 判断当前小时是否在已去重的通知时段中。
+func containsHour(hours []int, currentHour int) bool {
+	for _, hour := range hours {
+		if hour == currentHour {
+			return true
+		}
 	}
-	return setting.Value
+	return false
 }

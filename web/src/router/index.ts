@@ -15,30 +15,42 @@ const router = createRouter({
       children: [
         {
           path: '',
-          redirect: '/subscriptions',
+          redirect: '/dashboard',
+        },
+        {
+          path: 'dashboard',
+          name: 'Dashboard',
+          component: () => import('../views/Dashboard.vue'),
+          meta: { title: '概览' },
         },
         {
           path: 'subscriptions',
           name: 'Subscriptions',
           component: () => import('../views/Subscriptions.vue'),
+          meta: { title: '订阅' },
         },
         {
           path: 'settings',
           name: 'Settings',
           component: () => import('../views/Settings.vue'),
+          meta: { title: '设置' },
         },
       ],
+    },
+    {
+      path: '/:pathMatch(.*)*',
+      redirect: '/dashboard',
     },
   ],
 })
 
-// Navigation Guard
+// 路由守卫确保受保护页面只能在登录后访问，并保留原始目标地址。
 router.beforeEach((to, _from, next) => {
   const token = localStorage.getItem('token')
   if (to.meta.requiresAuth && !token) {
-    next('/login')
+    next({ path: '/login', query: { redirect: to.fullPath } })
   } else if (to.path === '/login' && token) {
-    next('/subscriptions')
+    next('/dashboard')
   } else {
     next()
   }

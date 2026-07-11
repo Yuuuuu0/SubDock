@@ -3,7 +3,10 @@
 # SubDock 本地开发编译脚本
 # 自动打包前端 + 后端
 
-set -e  # 遇到错误立即退出
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
 
 echo "========================================="
 echo "  SubDock 本地编译脚本"
@@ -25,7 +28,7 @@ check_dependencies() {
     fi
     
     if ! command -v pnpm &> /dev/null; then
-        echo -e "${RED}错误: 未找到 pnpm，请先安装 pnpm (npm install -g pnpm)${NC}"
+        echo -e "${RED}错误: 未找到 pnpm，请先运行 corepack enable${NC}"
         exit 1
     fi
     
@@ -44,11 +47,9 @@ build_frontend() {
     
     cd web
     
-    # 安装依赖（如果需要）
-    if [ ! -d "node_modules" ]; then
-        echo "安装前端依赖..."
-        pnpm install
-    fi
+    # 严格按锁文件安装依赖，确保本地与容器构建结果一致
+    echo "安装前端依赖..."
+    pnpm install --frozen-lockfile
     
     # 构建
     echo "编译 Vue 项目..."
@@ -71,6 +72,7 @@ copy_frontend_dist() {
     
     # 复制新的 dist
     cp -r web/dist internal/router/
+    touch internal/router/dist/.gitkeep
     echo -e "${GREEN}✓ 前端产物已复制到 internal/router/dist${NC}"
 }
 

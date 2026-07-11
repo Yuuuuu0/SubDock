@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"time"
 
 	"gorm.io/gorm"
@@ -26,6 +27,25 @@ const (
 	CycleUnitHalfYear CycleUnit = "half_year"
 	CycleUnitYear     CycleUnit = "year"
 )
+
+// IsValid 判断周期单位是否为系统支持的值。
+func (u CycleUnit) IsValid() bool {
+	switch u {
+	case CycleUnitDay, CycleUnitMonth, CycleUnitQuarter, CycleUnitHalfYear, CycleUnitYear:
+		return true
+	default:
+		return false
+	}
+}
+
+// ParseCycleUnit 解析并校验字符串周期单位。
+func ParseCycleUnit(value string) (CycleUnit, error) {
+	unit := CycleUnit(value)
+	if !unit.IsValid() {
+		return "", fmt.Errorf("不支持的周期单位: %s", value)
+	}
+	return unit, nil
+}
 
 // Subscription 订阅
 type Subscription struct {
@@ -56,41 +76,106 @@ type SubscriptionRenewal struct {
 	RenewCount     int       `gorm:"not null" json:"renew_count"`
 }
 
-// CalculateExpireDate 根据开始日期、周期和续订次数计算到期日期
-// 到期日期 = 开始日期 + (续订次数 + 1) 个周期
+// CalculateExpireDate 根据开始日期、周期和续订次数计算到期日期，月末日期会钳制到目标月最后一天。
 func (s *Subscription) CalculateExpireDate() time.Time {
 	totalCycles := s.RenewCount + 1
-	base := s.StartDate
-	for i := 0; i < totalCycles; i++ {
-		base = s.CalculateExpireDateFrom(base)
-	}
-	return base
+	return s.calculateExpireDateFrom(s.StartDate, totalCycles)
 }
 
-// CalculateExpireDateFrom 根据给定基准日期和周期计算到期日期
+// CalculateExpireDateFrom 根据给定基准日期推进一个订阅周期，并正确处理月末和闰年。
 func (s *Subscription) CalculateExpireDateFrom(base time.Time) time.Time {
+	return s.calculateExpireDateFrom(base, 1)
+}
+
+// ValidateCycle 校验订阅周期值和单位，避免无效周期产生不前进的续订。
+func (s *Subscription) ValidateCycle() error {
+	if s.CycleValue <= 0 {
+		return fmt.Errorf("周期数值必须大于 0")
+	}
+	if !s.CycleUnit.IsValid() {
+		return fmt.Errorf("不支持的周期单位: %s", s.CycleUnit)
+	}
+	return nil
+}
+
+// calculateExpireDateFrom 从基准日期推进指定周期数，月份类周期保持原始账单日锚点。
+func (s *Subscription) calculateExpireDateFrom(base time.Time, cycles int) time.Time {
+	if cycles <= 0 {
+		return base
+	}
 	switch s.CycleUnit {
 	case CycleUnitDay:
-		return base.AddDate(0, 0, s.CycleValue)
+		return base.AddDate(0, 0, s.CycleValue*cycles)
 	case CycleUnitMonth:
-		return base.AddDate(0, s.CycleValue, 0)
+		return addMonthsClamped(base, s.CycleValue*cycles)
 	case CycleUnitQuarter:
-		return base.AddDate(0, s.CycleValue*3, 0)
+		return addMonthsClamped(base, s.CycleValue*3*cycles)
 	case CycleUnitHalfYear:
-		return base.AddDate(0, s.CycleValue*6, 0)
+		return addMonthsClamped(base, s.CycleValue*6*cycles)
 	case CycleUnitYear:
-		return base.AddDate(s.CycleValue, 0, 0)
+		return addMonthsClamped(base, s.CycleValue*12*cycles)
 	default:
-		return base.AddDate(0, s.CycleValue, 0)
+		return base
 	}
 }
 
-// ShouldRemindToday 判断今天是否应该提醒
-func (s *Subscription) ShouldRemindToday() bool {
-	today := time.Now().Truncate(24 * time.Hour)
-	remindDate := s.ExpireDate.AddDate(0, 0, -s.RemindDays).Truncate(24 * time.Hour)
-	expireDate := s.ExpireDate.Truncate(24 * time.Hour)
+// addMonthsClamped 按月份推进日期，并将超出目标月的日期钳制到月末。
+func addMonthsClamped(base time.Time, months int) time.Time {
+	targetFirstDay := time.Date(
+		base.Year(),
+		base.Month()+time.Month(months),
+		1,
+		base.Hour(),
+		base.Minute(),
+		base.Second(),
+		base.Nanosecond(),
+		base.Location(),
+	)
+	lastDay := time.Date(
+		targetFirstDay.Year(),
+		targetFirstDay.Month()+1,
+		0,
+		base.Hour(),
+		base.Minute(),
+		base.Second(),
+		base.Nanosecond(),
+		base.Location(),
+	).Day()
+	day := base.Day()
+	if day > lastDay {
+		day = lastDay
+	}
+	return time.Date(
+		targetFirstDay.Year(),
+		targetFirstDay.Month(),
+		day,
+		base.Hour(),
+		base.Minute(),
+		base.Second(),
+		base.Nanosecond(),
+		base.Location(),
+	)
+}
+
+// DateOnlyIn 将时间的年月日解释为指定时区中的本地自然日零点。
+func DateOnlyIn(value time.Time, location *time.Location) time.Time {
+	if location == nil {
+		location = time.Local
+	}
+	return time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, location)
+}
+
+// ShouldRemindAt 判断指定时刻所在自然日是否落在订阅提醒窗口内。
+func (s *Subscription) ShouldRemindAt(now time.Time) bool {
+	today := DateOnlyIn(now, now.Location())
+	expireDate := DateOnlyIn(s.ExpireDate, now.Location())
+	remindDate := expireDate.AddDate(0, 0, -s.RemindDays)
 	return !today.Before(remindDate) && !today.After(expireDate)
+}
+
+// ShouldRemindToday 判断当前本地自然日是否应该提醒。
+func (s *Subscription) ShouldRemindToday() bool {
+	return s.ShouldRemindAt(time.Now())
 }
 
 // Setting 系统设置

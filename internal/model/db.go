@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 
@@ -23,20 +24,31 @@ func InitDB() (*gorm.DB, error) {
 	cfg := config.Get()
 
 	// 确保数据目录存在
-	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+	if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
 		return nil, fmt.Errorf("创建数据目录失败: %w", err)
 	}
 
 	dbPath := filepath.Join(cfg.DataDir, "subdock.db")
 	firstRun := isFirstRun(dbPath)
+	absDBPath, err := filepath.Abs(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("解析数据库路径失败: %w", err)
+	}
+	dsn := (&url.URL{Scheme: "file", Path: absDBPath}).String() + "?_busy_timeout=5000&_journal_mode=WAL&_foreign_keys=on"
 
-	var err error
-	db, err = gorm.Open(sqlite.Open(dbPath), &gorm.Config{
+	db, err = gorm.Open(sqlite.Open(dsn), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Warn),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("连接数据库失败: %w", err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("获取底层数据库连接失败: %w", err)
+	}
+	// 单文件 SQLite 在单进程内串行写入，配合条件更新避免调度器与 HTTP 请求并发丢更新。
+	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxIdleConns(1)
 
 	if firstRun {
 		log.Printf("检测到首次启动，数据库文件不存在，将初始化新库: %s", dbPath)
@@ -50,7 +62,7 @@ func InitDB() (*gorm.DB, error) {
 	}
 
 	// 初始化管理员账号
-	if err := initAdmin(); err != nil {
+	if err := initAdmin(db); err != nil {
 		return nil, fmt.Errorf("初始化管理员失败: %w", err)
 	}
 
@@ -102,10 +114,10 @@ func GetDB() *gorm.DB {
 	return db
 }
 
-// initAdmin 如果不存在管理员账号，则创建一个
-func initAdmin() error {
+// initAdmin 如果不存在管理员账号，则创建一个并输出一次性初始密码。
+func initAdmin(database *gorm.DB) error {
 	var count int64
-	if err := db.Model(&Admin{}).Count(&count).Error; err != nil {
+	if err := database.Model(&Admin{}).Count(&count).Error; err != nil {
 		return err
 	}
 
@@ -114,7 +126,10 @@ func initAdmin() error {
 	}
 
 	// 生成随机密码
-	password := generateRandomPassword(12)
+	password, err := generateRandomPassword(24)
+	if err != nil {
+		return err
+	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -126,7 +141,7 @@ func initAdmin() error {
 		PasswordHash: string(hash),
 	}
 
-	if err := db.Create(admin).Error; err != nil {
+	if err := database.Create(admin).Error; err != nil {
 		return err
 	}
 
@@ -141,11 +156,14 @@ func initAdmin() error {
 	return nil
 }
 
-// generateRandomPassword 生成随机密码
-func generateRandomPassword(length int) string {
-	bytes := make([]byte, length)
-	if _, err := rand.Read(bytes); err != nil {
-		return "subdock123456"
+// generateRandomPassword 生成指定长度的十六进制随机密码，随机源失败时返回错误而非弱默认值。
+func generateRandomPassword(length int) (string, error) {
+	if length <= 0 {
+		return "", fmt.Errorf("密码长度必须大于 0")
 	}
-	return hex.EncodeToString(bytes)[:length]
+	bytes := make([]byte, (length+1)/2)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", fmt.Errorf("生成管理员随机密码失败: %w", err)
+	}
+	return hex.EncodeToString(bytes)[:length], nil
 }

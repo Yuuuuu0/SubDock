@@ -6,6 +6,11 @@ subdock
 data/
 *.db
 
+# 本地环境变量与密钥
+.env
+.env.*
+!.env.example
+
 # IDE
 .idea/
 .vscode/
@@ -16,7 +21,8 @@ web/node_modules/
 web/dist/
 
 # 嵌入的前端构建产物
-internal/router/dist/
+internal/router/dist/*
+!internal/router/dist/.gitkeep
 
 # 系统
 .DS_Store
